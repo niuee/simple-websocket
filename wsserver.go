@@ -15,14 +15,25 @@ type Conn struct {
 	Connection   *websocket.Conn
 	Type         string
 	InputChannel *chan string
+	Name         string
 	Id           int
 	OutputList   []*websocket.Conn
 }
 
 type Room struct {
 	Name      string
-	UAVConns  []*Conn
-	UserConns []*Conn
+	UAVConns  map[string]*Conn
+	UserConns map[string]*Conn
+}
+
+type TempRoom struct {
+	Name  string
+	Conns map[string]*Conn
+}
+
+type MavMsg struct {
+	Destination string
+	MsgBody     string
 }
 
 func (c *Conn) Compare(b *Conn) int {
@@ -31,17 +42,6 @@ func (c *Conn) Compare(b *Conn) int {
 
 type WSRequestMsg struct {
 	Requester string `json:"requester"`
-}
-
-type UAVIdentifier struct {
-	Uavid int   `json:"UAVID"`
-	User  []int `json:"User"`
-}
-
-type UavUser struct {
-	Uuuid   int    `json:"uuuid"`
-	Name    string `json:"name"`
-	UavList []int  `json:"uavlist"`
 }
 
 type ticketResponse struct {
@@ -59,21 +59,12 @@ var user = map[string]int{
 	"user2": 2,
 }
 
-var connmap = map[int]*Conn{}
+var connmap = map[string]*Conn{}
 
-var conweb = map[int][]int{
-	1: {0, 3, 5},
-}
+var Rooms = map[string]TempRoom{}
 
-var UAVList = map[int]UAVIdentifier{
-	5: {
-		Uavid: 5,
-		User:  []int{1},
-	},
-}
-
-func addConnection(id int) *Conn {
-	if conn, ok := connmap[id]; ok {
+func addConnection(name string) *Conn {
+	if conn, ok := connmap[name]; ok {
 		return conn
 	} else {
 		return nil
@@ -83,32 +74,37 @@ func addConnection(id int) *Conn {
 func wshandle(rw http.ResponseWriter, r *http.Request) {
 
 	//fmt.Println("All connections")
-	fmt.Println(connmap)
 	var conn *Conn = nil
-	var intVar int
 	connectionid := r.Header["Connectionid"]
-	intVar, err := strconv.Atoi(connectionid[0])
+	connectionName := r.Header["Connectionname"]
+	connectionIdInt, err := strconv.Atoi(connectionid[0])
 	if err != nil {
 		log.Println(err)
 		return
 	}
-	conn = addConnection(intVar)
+
+	conn = addConnection(connectionName[0])
 	if conn == nil {
-		fmt.Println("Jia la")
 		connection, err := wsupgrader.Upgrade(rw, r, nil)
 		if err != nil {
 			log.Println(err)
 			return
 		}
-		fmt.Println(intVar)
 		conn = &Conn{
 			Connection: connection,
-			Id:         intVar,
+			Name:       connectionName[0],
+			Id:         connectionIdInt,
 		}
-		fmt.Println(conn)
+	}
+	if connectionIdInt%2 == 0 {
+		//add to first room
+		Rooms["Second Room"].Conns[conn.Name] = conn
+	} else {
+		Rooms["First Room"].Conns[conn.Name] = conn
 	}
 
 	go readFromConnection(conn)
+	fmt.Println("Exiting WS connection establishment handler function")
 }
 
 func readFromConnection(c *Conn) {
@@ -118,18 +114,32 @@ func readFromConnection(c *Conn) {
 			log.Println(err)
 			break
 		}
-		log.Printf("Received Message: %s. Message Type: %d\n", message, mt)
+		log.Printf("Received Message: %s. Message Type: %d\n from %s", message, mt, c.Name)
 		log.Println(time.Now().String())
+
 	}
 
-	defer c.Connection.Close()
-	defer delete(connmap, c.Id)
-	fmt.Printf("Connection %d is disconnecting\n", c.Id)
-
+	defer func() {
+		c.Connection.Close()
+		delete(connmap, c.Name)
+		if c.Id%2 == 0 {
+			delete(Rooms["Second Room"].Conns, c.Name)
+			fmt.Println("Removed from Room 2")
+		} else {
+			delete(Rooms["First Room"].Conns, c.Name)
+			fmt.Println("Removed from Room 1")
+		}
+	}()
+	fmt.Printf("Connection %s is disconnecting\n", c.Name)
+	for connectionName, connection := range Rooms["Second Room"].Conns {
+		fmt.Println(connectionName)
+		fmt.Println(connection.Type)
+	}
 }
 
 func notifyWSConnection(rw http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
+	fmt.Println(r.URL.Scheme)
 	jsonDecoder := json.NewDecoder(r.Body)
 	message := WSRequestMsg{}
 	err := jsonDecoder.Decode(&message)
@@ -158,8 +168,15 @@ func notifyWSConnection(rw http.ResponseWriter, r *http.Request) {
 
 func main() {
 	http.HandleFunc("/wsticket", notifyWSConnection)
-	http.HandleFunc("/ws", wshandle)
+	http.HandleFunc("/websocket2/ws", wshandle)
 
+	Rooms["First Room"] = TempRoom{
+		Name:  "First Room",
+		Conns: make(map[string]*Conn),
+	}
+	Rooms["Second Room"] = TempRoom{
+		Name:  "Second Room",
+		Conns: make(map[string]*Conn),
+	}
 	http.ListenAndServe(":9999", nil)
-
 }
